@@ -1,0 +1,6 @@
+{
+  "name": "FocoDiario",
+  "description": "Sistema de gestão diária: Kanban diário, controle de mensalidades com boletos, e controle de pedidos de pintos para agropecuária.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
