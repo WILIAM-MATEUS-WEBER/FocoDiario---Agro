@@ -402,7 +402,7 @@ const upload = multer({
 // ROTAS DE AUTENTICAÇÃO
 // ==========================================
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/user-auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Preencha o usuário e a senha.' });
@@ -435,7 +435,7 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Novo registro de usuário (Admin Only)
-app.post('/api/auth/register', authenticate, requireAdmin, async (req, res) => {
+app.post('/api/user-auth/register', authenticate, requireAdmin, async (req, res) => {
   const { username, password, name, role } = req.body;
   if (!username || !password || !name || !role) {
     return res.status(400).json({ error: 'Todos os campos são obrigatórios para registrar usuário.' });

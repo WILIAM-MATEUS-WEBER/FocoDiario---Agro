@@ -23,7 +23,7 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   // Trata globalmente erro de autenticação deslogando o usuário se o token expirar (401)
   try {
     const response = await fetch(input, modifiedInit);
-    if (response.status === 401 && !String(input).includes('/api/auth/login')) {
+    if (response.status === 401 && !String(input).includes('/api/user-auth/login')) {
       // Token expirado ou inválido
       localStorage.removeItem('focodiario_session');
       window.location.reload();
