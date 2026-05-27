@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ShieldAlert, TrendingUp, DollarSign, ListTodo, Calendar, AlertTriangle, RefreshCw } from 'lucide-react';
 import { User, Mensalidade, ChickBatch } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface DashboardOverviewProps {
   user: User;
@@ -27,18 +28,20 @@ export default function DashboardOverview({ user, onNavigate }: DashboardOvervie
   const fetchData = async () => {
     setLoading(true);
     try {
-      // Fetch alerts
-      const resAlerts = await fetch('/api/notifications');
-      const dataAlerts = await resAlerts.json();
-      setAlerts(dataAlerts);
+      if (user.role === 'admin') {
+        // Fetch alerts
+        const resAlerts = await apiFetch('/api/notifications');
+        const dataAlerts = await resAlerts.json();
+        setAlerts(dataAlerts);
 
-      // Fetch mensalidades
-      const resBills = await fetch('/api/mensalidades');
-      const dataBills = await resBills.json();
-      setBills(dataBills);
+        // Fetch mensalidades
+        const resBills = await apiFetch('/api/mensalidades');
+        const dataBills = await resBills.json();
+        setBills(dataBills);
+      }
 
       // Fetch chick batches
-      const resBatches = await fetch('/api/chicks/batches');
+      const resBatches = await apiFetch('/api/chicks/batches');
       const dataBatches = await resBatches.json();
       setBatches(dataBatches);
     } catch (error) {
@@ -88,39 +91,39 @@ export default function DashboardOverview({ user, onNavigate }: DashboardOvervie
         </div>
       </div>
 
-      {/* PAINEL DE NOTIFICAÇÕES (CRON SIMULATION) */}
-      <div className="bg-white border border-neutral-200 rounded-xl shadow-xs overflow-hidden" id="notification-card">
-        <div className="px-6 py-4 bg-red-50 border-b border-red-100/60 flex items-center gap-2 text-red-800">
-          <AlertTriangle size={20} className="text-red-600 shrink-0" />
-          <h3 className="text-sm font-bold uppercase tracking-wider font-sans">
-            Alertas de Mensalidades Próximas ao Vencimento
-          </h3>
-        </div>
-        <div className="p-6 divide-y divide-neutral-100">
-          {alerts.length === 0 ? (
-            <div className="py-4 text-center text-neutral-500 text-sm" id="no-alerts-msg">
-              ✅ Nenhuma mensalidade vencendo amanhã ou nos próximos 2 dias. Tudo sob controle!
-            </div>
-          ) : (
-            alerts.map((alert) => (
-              <div
-                key={alert.id}
-                id={alert.id}
-                className={`py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all ${
-                  alert.type === 'today' 
-                    ? 'bg-red-50/50 px-3 rounded-lg border-l-4 border-red-500' 
-                    : alert.type === 'urgent_1_day' 
-                    ? 'bg-amber-50/50 px-3 rounded-lg border-l-4 border-amber-500' 
-                    : 'bg-yellow-50/30 px-3 rounded-lg border-l-4 border-yellow-400'
-                }`}
-              >
-                <div className="space-y-1">
-                  <p className="text-sm font-semibold text-neutral-950 font-sans">{alert.message}</p>
-                  <p className="text-xs text-neutral-500 font-mono">
-                    Dia do vencimento configurado: {alert.dueDay} • Seção: {alert.name}
-                  </p>
-                </div>
-                {user.role === 'admin' ? (
+      {/* PAINEL DE NOTIFICAÇÕES (CRON SIMULATION) - EXCLUSIVO PARA ADMINISTRADORES */}
+      {user.role === 'admin' && (
+        <div className="bg-white border border-neutral-200 rounded-xl shadow-xs overflow-hidden" id="notification-card">
+          <div className="px-6 py-4 bg-red-50 border-b border-red-100/60 flex items-center gap-2 text-red-800">
+            <AlertTriangle size={20} className="text-red-600 shrink-0" />
+            <h3 className="text-sm font-bold uppercase tracking-wider font-sans">
+              Alertas de Mensalidades Próximas ao Vencimento
+            </h3>
+          </div>
+          <div className="p-6 divide-y divide-neutral-100">
+            {alerts.length === 0 ? (
+              <div className="py-4 text-center text-neutral-500 text-sm" id="no-alerts-msg">
+                ✅ Nenhuma mensalidade vencendo amanhã ou nos próximos 2 dias. Tudo sob controle!
+              </div>
+            ) : (
+              alerts.map((alert) => (
+                <div
+                  key={alert.id}
+                  id={alert.id}
+                  className={`py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all ${
+                    alert.type === 'today' 
+                      ? 'bg-red-50/50 px-3 rounded-lg border-l-4 border-red-500' 
+                      : alert.type === 'urgent_1_day' 
+                      ? 'bg-amber-50/50 px-3 rounded-lg border-l-4 border-amber-500' 
+                      : 'bg-yellow-50/30 px-3 rounded-lg border-l-4 border-yellow-400'
+                  }`}
+                >
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-neutral-950 font-sans">{alert.message}</p>
+                    <p className="text-xs text-neutral-500 font-mono">
+                      Dia do vencimento configurado: {alert.dueDay} • Seção: {alert.name}
+                    </p>
+                  </div>
                   <button
                     id={`alert-action-${alert.mensalidadeId}`}
                     onClick={() => onNavigate('mensalidades')}
@@ -128,17 +131,15 @@ export default function DashboardOverview({ user, onNavigate }: DashboardOvervie
                   >
                     Anexar Boleto
                   </button>
-                ) : (
-                  <div className="text-xs text-red-600 font-bold uppercase tracking-wider">Apenas Admin</div>
-                )}
-              </div>
-            ))
-          )}
+                </div>
+              ))
+            )}
+          </div>
+          <div className="px-6 py-3 bg-neutral-50 border-t border-neutral-100 text-xs text-neutral-400 font-sans">
+            🔔 O sistema calcula alertas automaticamente 2 dias e 1 dia antes da data de vencimento parametrizada.
+          </div>
         </div>
-        <div className="px-6 py-3 bg-neutral-50 border-t border-neutral-100 text-xs text-neutral-400 font-sans">
-          🔔 O sistema calcula alertas automaticamente 2 dias e 1 dia antes da data de vencimento parametrizada.
-        </div>
-      </div>
+      )}
 
       {/* METRIC CARD GRID */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6" id="dashboard-metrics-grid">

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Mensalidade, User, MensalidadeStatus } from '../types';
 import { Plus, DollarSign, Calendar, Tag, FileText, CheckCircle, AlertCircle, FileLock2, Trash2, ArrowUpRight, Check, X, ShieldAlert } from 'lucide-react';
+import { apiFetch } from '../utils/api';
 
 interface MensalidadesProps {
   user: User;
@@ -70,7 +71,7 @@ export default function Mensalidades({ user }: MensalidadesProps) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/mensalidades?month=${selectedMonth}`);
+      const res = await apiFetch(`/api/mensalidades?month=${selectedMonth}`);
       const data = await res.json();
       setBills(data);
     } catch (err) {
@@ -92,7 +93,7 @@ export default function Mensalidades({ user }: MensalidadesProps) {
     }
 
     try {
-      const res = await fetch('/api/mensalidades', {
+      const res = await apiFetch('/api/mensalidades', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -130,7 +131,7 @@ export default function Mensalidades({ user }: MensalidadesProps) {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`/api/mensalidades/${billId}/upload`, {
+      const response = await apiFetch(`/api/mensalidades/${billId}/upload`, {
         method: 'POST',
         body: formData
       });
@@ -157,7 +158,7 @@ export default function Mensalidades({ user }: MensalidadesProps) {
     }
 
     try {
-      const response = await fetch(`/api/mensalidades/${billId}/justify`, {
+      const response = await apiFetch(`/api/mensalidades/${billId}/justify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ justification })
@@ -181,7 +182,7 @@ export default function Mensalidades({ user }: MensalidadesProps) {
     if (!confirm('Atenção: A exclusão de uma mensalidade irá remover o seu cadastro e sua renovação para os meses seguintes. Os registros de pagamentos em meses passados serão preservados no histórico financeiro.\n\nDeseja deletar esta conta?')) return;
 
     try {
-      const response = await fetch(`/api/mensalidades/${billId}`, {
+      const response = await apiFetch(`/api/mensalidades/${billId}`, {
         method: 'DELETE'
       });
       if (response.ok) {
@@ -425,7 +426,7 @@ export default function Mensalidades({ user }: MensalidadesProps) {
                           {bill.pdfUrl && (
                             <a
                               id={`view-pdf-${bill.id}`}
-                              href={bill.pdfUrl}
+                              href={`${bill.pdfUrl}?token=${encodeURIComponent(user.token || '')}`}
                               target="_blank"
                               rel="referrer"
                               className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-bold transition-colors inline-flex items-center gap-1 cursor-pointer"

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ChickBatch, CustomerOrder, BreedQuantity, User, CustomerOrderStatus } from '../types';
 import { Plus, ClipboardCopy, FileSpreadsheet, PackageCheck, FileDown, CheckSquare, Trash2, Calendar, RefreshCw, Layers, Settings } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { apiFetch } from '../utils/api';
 
 interface PedidosPintosProps {
   user: User;
@@ -34,7 +35,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
 
   const loadBreeds = async () => {
     try {
-      const response = await fetch('/api/chicks/breeds');
+      const response = await apiFetch('/api/chicks/breeds');
       if (response.ok) {
         const data = await response.json();
         setBreeds(data);
@@ -47,7 +48,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
   const loadBatches = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/chicks/batches');
+      const response = await apiFetch('/api/chicks/batches');
       const data = await response.json();
       setBatches(data);
     } catch (e) {
@@ -83,7 +84,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
     }
 
     try {
-      const response = await fetch('/api/chicks/batch/open', {
+      const response = await apiFetch('/api/chicks/batch/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ openedBy: user.name })
@@ -120,7 +121,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
     }
 
     try {
-      const response = await fetch('/api/chicks/batch/order', {
+      const response = await apiFetch('/api/chicks/batch/order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -151,7 +152,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
     }
 
     try {
-      const response = await fetch(`/api/chicks/batch/${activeBatch.id}/order/${orderId}`, {
+      const response = await apiFetch(`/api/chicks/batch/${activeBatch.id}/order/${orderId}`, {
         method: 'DELETE'
       });
       if (response.ok) {
@@ -165,7 +166,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
   const handleToggleDeliver = async (batchId: string, orderId: string, currentStatus: CustomerOrderStatus) => {
     const nextStatus: CustomerOrderStatus = currentStatus === 'registered' ? 'delivered' : 'registered';
     try {
-      const response = await fetch(`/api/chicks/batch/${batchId}/order/${orderId}/deliver`, {
+      const response = await apiFetch(`/api/chicks/batch/${batchId}/order/${orderId}/deliver`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus })
@@ -312,7 +313,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
     }
 
     try {
-      const response = await fetch(`/api/chicks/batch/${batchId}/finalize`, {
+      const response = await apiFetch(`/api/chicks/batch/${batchId}/finalize`, {
         method: 'POST'
       });
       const data = await response.json();
@@ -331,7 +332,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
     if (!newBreedName.trim()) return;
     setManageError(null);
     try {
-      const response = await fetch('/api/chicks/breeds', {
+      const response = await apiFetch('/api/chicks/breeds', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newBreedName })
@@ -351,7 +352,7 @@ export default function PedidosPintos({ user }: PedidosPintosProps) {
     if (!confirm(`Deseja realmente remover a espécie "${breedName}"?`)) return;
     setManageError(null);
     try {
-      const response = await fetch(`/api/chicks/breeds/${encodeURIComponent(breedName)}`, {
+      const response = await apiFetch(`/api/chicks/breeds/${encodeURIComponent(breedName)}`, {
         method: 'DELETE'
       });
       const data = await response.json();

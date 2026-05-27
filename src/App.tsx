@@ -5,7 +5,8 @@ import DashboardOverview from './components/DashboardOverview';
 import KanbanBoard from './components/KanbanBoard';
 import Mensalidades from './components/Mensalidades';
 import PedidosPintos from './components/PedidosPintos';
-import { LayoutDashboard, ListTodo, DollarSign, Milestone, LogOut, CheckSquare, ShieldCheck, UserCheck } from 'lucide-react';
+import UserManagement from './components/UserManagement';
+import { LayoutDashboard, ListTodo, DollarSign, Milestone, LogOut, CheckSquare, ShieldCheck, UserCheck, Users } from 'lucide-react';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -103,6 +104,21 @@ export default function App() {
                 </button>
               )}
 
+              {user.role === 'admin' && (
+                <button
+                  id="tab-btn-usuarios"
+                  onClick={() => setActiveTab('usuarios')}
+                  className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeTab === 'usuarios'
+                      ? 'bg-neutral-900 text-white shadow-xs'
+                      : 'text-neutral-500 hover:text-neutral-950 hover:bg-neutral-100'
+                  }`}
+                >
+                  <Users size={14} />
+                  Gerenciar Usuários
+                </button>
+              )}
+
               <button
                 id="tab-btn-pedidos"
                 onClick={() => setActiveTab('pedidos')}
@@ -181,6 +197,18 @@ export default function App() {
             Contas
           </button>
         )}
+        {user.role === 'admin' && (
+          <button
+            id="tab-btn-users-mobile"
+            onClick={() => setActiveTab('usuarios')}
+            className={`flex-1 py-2 text-center text-[10px] font-bold rounded-md flex flex-col items-center gap-1 transition-colors capitalize ${
+              activeTab === 'usuarios' ? 'bg-neutral-900 text-white' : 'text-neutral-500'
+            }`}
+          >
+            <Users size={14} />
+            Usuários
+          </button>
+        )}
         <button
           id="tab-btn-pedidos-mobile"
           onClick={() => setActiveTab('pedidos')}
@@ -200,6 +228,7 @@ export default function App() {
           {activeTab === 'kanban' && <KanbanBoard user={user} />}
           {activeTab === 'mensalidades' && <Mensalidades user={user} />}
           {activeTab === 'pedidos' && <PedidosPintos user={user} />}
+          {activeTab === 'usuarios' && <UserManagement currentUser={user} />}
         </div>
       </main>
 

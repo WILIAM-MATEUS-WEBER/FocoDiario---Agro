@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Lock, User as UserIcon, ShieldAlert } from 'lucide-react';
 import { User } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface LoginProps {
   onLoginSuccess: (user: User) => void;
@@ -23,7 +24,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     setError(null);
 
     try {
-      const response = await fetch('/api/auth/login', {
+      const response = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })

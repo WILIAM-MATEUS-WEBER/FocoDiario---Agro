@@ -5,6 +5,7 @@ export interface User {
   username: string;
   role: UserRole;
   name: string;
+  token?: string;
 }
 
 export type TaskStatus = 'todo' | 'inprogress' | 'pending' | 'completed';

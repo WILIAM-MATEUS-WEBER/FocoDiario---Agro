@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { KanbanTask, TaskStatus, User, KanbanHistoryEntry } from '../types';
 import { Plus, Check, Play, ArrowRight, ArrowLeft, Archive, Trash2, Calendar, Search, RefreshCw } from 'lucide-react';
+import { apiFetch } from '../utils/api';
 
 interface KanbanBoardProps {
   user: User;
@@ -38,7 +39,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
   const loadTasks = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/kanban?userId=${targetUser.id}`);
+      const res = await apiFetch(`/api/kanban?userId=${targetUser.id}`);
       const data = await res.json();
       setTasks(data);
     } catch (e) {
@@ -51,7 +52,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
   const loadHistory = async () => {
     setHistoryLoading(true);
     try {
-      const res = await fetch(`/api/kanban/history?date=${historySearchDate}`);
+      const res = await apiFetch(`/api/kanban/history?date=${historySearchDate}`);
       const data = await res.json();
       setHistoryRecords(data);
     } catch (e) {
@@ -64,7 +65,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
   const checkIfTodayIsClosed = async () => {
     try {
       const todayDate = new Date().toISOString().split('T')[0];
-      const res = await fetch(`/api/kanban/history?date=${todayDate}&userId=${targetUser.id}`);
+      const res = await apiFetch(`/api/kanban/history?date=${todayDate}&userId=${targetUser.id}`);
       if (res.ok) {
         const data = await res.json();
         setIsTodayClosed(data.length > 0);
@@ -89,7 +90,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
     if (!newTitle.trim()) return;
 
     try {
-      const response = await fetch('/api/kanban', {
+      const response = await apiFetch('/api/kanban', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -129,7 +130,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
     }
 
     try {
-      const response = await fetch(`/api/kanban/${taskId}`, {
+      const response = await apiFetch(`/api/kanban/${taskId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus })
@@ -146,7 +147,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
   const handleDeleteTask = async (taskId: string) => {
     if (!confirm('Tem certeza que deseja remover esta tarefa permanentemente?')) return;
     try {
-      const response = await fetch(`/api/kanban/${taskId}`, {
+      const response = await apiFetch(`/api/kanban/${taskId}`, {
         method: 'DELETE'
       });
       if (response.ok) {
@@ -170,7 +171,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
     }
 
     try {
-      const response = await fetch('/api/kanban/close-day', {
+      const response = await apiFetch('/api/kanban/close-day', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -199,7 +200,7 @@ export default function KanbanBoard({ user }: KanbanBoardProps) {
     }
 
     try {
-      const response = await fetch('/api/kanban/reopen-day', {
+      const response = await apiFetch('/api/kanban/reopen-day', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

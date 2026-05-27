@@ -4,6 +4,8 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
 import crypto from 'crypto';
+import pg from 'pg';
+const { Pool } = pg;
 import { 
   UserRole, 
   User, 
@@ -24,7 +26,22 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Diretorios necessarios para o sistema
+// Configuração de Conexão com PostgreSQL (seja Vercel Postgres ou DATABASE_URL padrão)
+// Dá preferência para o parãmetro de conexão securitizado do Vercel
+const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+let pool: pg.Pool | null = null;
+
+if (connectionString) {
+  console.log('PostgreSQL detectado! Inicializando conexão segura com o banco...');
+  pool = new Pool({
+    connectionString,
+    ssl: {
+      rejectUnauthorized: false // Essencial para conexões seguras de servidores de hospedagem como Vercel/Neon
+    }
+  });
+}
+
+// Diretorios necessarios para o sistema (fallback local se necessário)
 const DATA_DIR = path.join(process.cwd(), 'data');
 const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'focodiario_db.json');
@@ -36,8 +53,108 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Configura o middleware para servir uploads estaticamente de forma segura
-app.use('/uploads', express.static(UPLOADS_DIR));
+const SECRET_KEY = process.env.API_SECRET_KEY || 'focodiario_secret_key_2026_super_secure';
+
+
+function createToken(payload: object): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify({ ...payload, exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url'); // 12h exp
+  const signature = crypto.createHmac('sha256', SECRET_KEY)
+    .update(`${header}.${body}`)
+    .digest('base64url');
+  return `${header}.${body}.${signature}`;
+}
+
+function verifyToken(token: string): any | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [header, body, signature] = parts;
+    const expectedSignature = crypto.createHmac('sha256', SECRET_KEY)
+      .update(`${header}.${body}`)
+      .digest('base64url');
+    if (signature !== expectedSignature) return null;
+    
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (payload.exp && Date.now() > payload.exp) {
+      return null; // Expired
+    }
+    return payload;
+  } catch (error) {
+    return null;
+  }
+}
+
+function authenticate(req: any, res: any, next: any) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Acesso negado. Token não fornecido.' });
+  }
+
+  const parts = authHeader.split(' ');
+  if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    return res.status(401).json({ error: 'Formato do token inválido.' });
+  }
+
+  const payload = verifyToken(parts[1]);
+  if (!payload) {
+    return res.status(401).json({ error: 'Sessão inválida ou expirada. Efetue login novamente.' });
+  }
+
+  req.user = payload;
+  next();
+}
+
+function requireAdmin(req: any, res: any, next: any) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Permissão negada. Apenas administradores podem executar esta ação.' });
+  }
+  next();
+}
+
+function isValidPdfBytes(filePath: string): boolean {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(4);
+    fs.readSync(fd, buffer, 0, 4, 0);
+    fs.closeSync(fd);
+    
+    // O cabeçalho deve iniciar exatamente com os bites do marcador '%PDF'
+    return buffer.toString('utf8') === '%PDF';
+  } catch (error) {
+    return false;
+  }
+}
+
+// Configura o middleware para servir uploads estaticamente APENAS mediante login verificado
+app.get('/uploads/:filename', (req, res) => {
+  const { filename } = req.params;
+  const { token } = req.query;
+
+  let verifiedUser = null;
+  
+  // Tenta extrair token pelo header ou pelo query parameter (links diretos do navegador)
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    verifiedUser = verifyToken(authHeader.substring(7));
+  } else if (typeof token === 'string') {
+    verifiedUser = verifyToken(token);
+  }
+
+  if (!verifiedUser) {
+    return res.status(403).send('Acesso proibido. Faça login no sistema para visualizar boletos e comprovantes de pagamento.');
+  }
+
+  // Previne Path Traversal (segurança contra vazamento de arquivos do sistema)
+  const safeFilename = path.basename(filename);
+  const filePath = path.join(UPLOADS_DIR, safeFilename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Arquivo não encontrado.');
+  }
+
+  return res.sendFile(filePath);
+});
 
 // Helper para hashing seguro de senhas utilizando Node.js crypto (PBKDF2 - alto nivel de seguranca contra injection e brute force)
 function hashPassword(password: string, salt: string): string {
@@ -129,7 +246,8 @@ const defaultDb: DatabaseSchema = {
   ]
 };
 
-function loadDb(): DatabaseSchema {
+// Funções utilitárias de carga/escrita do arquivo local
+function loadDbFromFile(): DatabaseSchema {
   try {
     if (fs.existsSync(DB_FILE)) {
       const data = fs.readFileSync(DB_FILE, 'utf8');
@@ -196,7 +314,7 @@ function loadDb(): DatabaseSchema {
       }
 
       if (changed) {
-        saveDb(db);
+        saveDbToFile(db);
       }
       return db;
     }
@@ -219,11 +337,11 @@ function loadDb(): DatabaseSchema {
       month: currentMonth
     }))
   };
-  saveDb(initialDb);
+  saveDbToFile(initialDb);
   return initialDb;
 }
 
-function saveDb(db: DatabaseSchema) {
+function saveDbToFile(db: DatabaseSchema) {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
   } catch (error) {
@@ -231,8 +349,131 @@ function saveDb(db: DatabaseSchema) {
   }
 }
 
-// Inicializacao do DB
-loadDb();
+// Inicializa a tabela focodiario_state no PostgreSQL caso conectando ao banco pela primeira vez
+async function initPostgresDb() {
+  if (!pool) return;
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS focodiario_state (
+          id INT PRIMARY KEY,
+          data JSONB,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      
+      const checkRes = await client.query('SELECT COUNT(*) FROM focodiario_state WHERE id = 1;');
+      if (parseInt(checkRes.rows[0].count, 10) === 0) {
+        const currentMonth = new Date().toISOString().substring(0, 7);
+        const initialDb: DatabaseSchema = {
+          ...defaultDb,
+          mensalidades: (defaultDb.mensalidadesTemplates || []).map(t => ({
+            id: `m-${Date.now()}-${t.id}-${Math.floor(Math.random() * 1000)}`,
+            templateId: t.id,
+            name: t.name,
+            value: t.value,
+            dueDay: t.dueDay,
+            category: t.category,
+            status: 'pending',
+            month: currentMonth
+          }))
+        };
+        await client.query(
+          'INSERT INTO focodiario_state (id, data) VALUES ($1, $2);',
+          [1, JSON.stringify(initialDb)]
+        );
+        console.log('Tabela de estado persistente criada no PostgreSQL com as credenciais iniciais.');
+      } else {
+        console.log('Banco PostgreSQL conectado e verificado com sucesso.');
+      }
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('Falha de inicialização no PostgreSQL:', err);
+  }
+}
+
+// Estado em memória (cached) para servir requisições de forma ultrarrápida
+let cachedDb: DatabaseSchema | null = null;
+
+function loadDb(): DatabaseSchema {
+  if (cachedDb) return cachedDb;
+  return loadDbFromFile();
+}
+
+function saveDb(db: DatabaseSchema) {
+  cachedDb = db;
+  saveDbToFile(db);
+  
+  if (pool) {
+    const syncPromise = pool.query(
+      'INSERT INTO focodiario_state (id, data, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP;',
+      [1, JSON.stringify(db)]
+    ).catch((err: any) => {
+      console.error('Erro de sincronização assíncrona com PostgreSQL:', err);
+    });
+
+    const activeReq = (global as any).currentExpressRequest;
+    if (activeReq && typeof activeReq.trackWrite === 'function') {
+      activeReq.trackWrite(syncPromise);
+    }
+  }
+}
+
+// Registra interceptor de requisições do Express para sincronizar dados Postgres
+app.use(async (req: any, res: any, next: any) => {
+  (global as any).currentExpressRequest = req;
+
+  const originalJson = res.json;
+  const pendingWrites: Array<Promise<any>> = [];
+
+  req.trackWrite = (promise: Promise<any>) => {
+    pendingWrites.push(promise);
+  };
+
+  res.json = async function(data: any) {
+    if (pendingWrites.length > 0) {
+      await Promise.all(pendingWrites).catch(err => {
+        console.error('Erro ao aguardar conclusões de escrita pendentes no Postgres:', err);
+      });
+    }
+    return originalJson.call(res, data);
+  };
+
+  if (pool) {
+    try {
+      const dbResult = await pool.query('SELECT data FROM focodiario_state WHERE id = 1 LIMIT 1;');
+      if (dbResult.rows && dbResult.rows.length > 0) {
+        cachedDb = dbResult.rows[0].data;
+      }
+    } catch (err) {
+      console.error('Erro ao carregar dados do Postgres para a requisição. Usando backup local em cache:', err);
+    }
+  }
+
+  next();
+});
+
+// Inicialização imediata
+if (pool) {
+  initPostgresDb().then(async () => {
+    try {
+      const dbResult = await pool.query('SELECT data FROM focodiario_state WHERE id = 1 LIMIT 1;');
+      if (dbResult.rows && dbResult.rows.length > 0) {
+        cachedDb = dbResult.rows[0].data;
+        console.log('Cache inicial de dados Postgres preenchido com sucesso.');
+      }
+    } catch (e) {
+      console.log('Falha ao obter cache inicial Postgres. Utilizando arquivo local.');
+      cachedDb = loadDbFromFile();
+    }
+  });
+} else {
+  loadDb();
+}
+
 
 // Configuração do Multer para upload restrito a PDF (validado server-side)
 const storage = multer.diskStorage({
@@ -282,12 +523,17 @@ app.post('/api/auth/login', (req, res) => {
 
   const checkHash = hashPassword(password, foundUser.salt);
   if (checkHash === foundUser.passwordHash) {
-    // Retorna os dados publicos do usuario autenticado com seguranca
-    return res.json({
+    const userPayload = {
       id: foundUser.id,
       username: foundUser.username,
       name: foundUser.name,
       role: foundUser.role
+    };
+    const token = createToken(userPayload);
+    // Retorna os dados publicos do usuario autenticado com seguranca e o token assinado stateless
+    return res.json({
+      ...userPayload,
+      token
     });
   }
 
@@ -295,7 +541,7 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // Novo registro de usuário (Admin Only)
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', authenticate, requireAdmin, (req, res) => {
   const { username, password, name, role } = req.body;
   if (!username || !password || !name || !role) {
     return res.status(400).json({ error: 'Todos os campos são obrigatórios para registrar usuário.' });
@@ -328,15 +574,138 @@ app.post('/api/auth/register', (req, res) => {
   });
 });
 
-
 // ==========================================
+// ROTAS DE GERENCIAMENTO DE USUÁRIOS (ADMIN ONLY)
+// ==========================================
+
+// Listar todos os usuários (Sem hashes/salts por segurança)
+app.get('/api/users', authenticate, requireAdmin, (req, res) => {
+  const db = loadDb();
+  const safeUsers = db.users.map(u => ({
+    id: u.id,
+    username: u.username,
+    name: u.name,
+    role: u.role
+  }));
+  return res.json(safeUsers);
+});
+
+// Criar novo usuário (Admin Only)
+app.post('/api/users', authenticate, requireAdmin, (req, res) => {
+  const { username, password, name, role } = req.body;
+  if (!username || !password || !name || !role) {
+    return res.status(400).json({ error: 'Todos os campos são obrigatórios para registrar um novo usuário.' });
+  }
+
+  const db = loadDb();
+  const exists = db.users.some(u => u.username.toLowerCase() === username.toLowerCase());
+  if (exists) {
+    return res.status(400).json({ error: 'Este nome de usuário já está sendo utilizado.' });
+  }
+
+  const salt = generateSalt();
+  const newUser = {
+    id: `u-${Date.now()}`,
+    username: username.trim().toLowerCase(),
+    name: name.trim(),
+    role: role as UserRole,
+    passwordHash: hashPassword(password, salt),
+    salt
+  };
+
+  db.users.push(newUser);
+  saveDb(db);
+
+  return res.json({
+    id: newUser.id,
+    username: newUser.username,
+    name: newUser.name,
+    role: newUser.role
+  });
+});
+
+// Editar usuário (Admin Only) - Altera nome, login, função e senha (se enviada)
+app.put('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) => {
+  const { id } = req.params;
+  const { username, password, name, role } = req.body;
+
+  const db = loadDb();
+  const userIdx = db.users.findIndex(u => u.id === id);
+  if (userIdx === -1) {
+    return res.status(404).json({ error: 'Usuário não encontrado.' });
+  }
+
+  const targetUser = db.users[userIdx];
+
+  // Regra contra auto-rebaixamento de nível
+  if (req.user.id === id && role && role !== 'admin') {
+    return res.status(400).json({ error: 'Por segurança, você não pode alterar ou rebaixar seu próprio nível de administrador.' });
+  }
+
+  // Verifica se o novo username já existe em outro usuário
+  if (username) {
+    const cleanedUsername = username.trim().toLowerCase();
+    const exists = db.users.some(u => u.id !== id && u.username.toLowerCase() === cleanedUsername);
+    if (exists) {
+      return res.status(400).json({ error: 'Este login de usuário já está em uso por outra pessoa.' });
+    }
+    targetUser.username = cleanedUsername;
+  }
+
+  if (name) targetUser.name = name.trim();
+  if (role) targetUser.role = role as UserRole;
+
+  // Atualiza senha se fornecida
+  if (password && password.trim() !== '') {
+    const salt = generateSalt();
+    targetUser.salt = salt;
+    targetUser.passwordHash = hashPassword(password, salt);
+  }
+
+  saveDb(db);
+
+  return res.json({
+    id: targetUser.id,
+    username: targetUser.username,
+    name: targetUser.name,
+    role: targetUser.role
+  });
+});
+
+// Excluir usuário (Admin Only)
+app.delete('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) => {
+  const { id } = req.params;
+
+  // Impede que o próprio usuário administrador se exclua do sistema
+  if (req.user.id === id) {
+    return res.status(400).json({ error: 'Segurança: Você não pode remover sua própria conta estando conectado a ela.' });
+  }
+
+  const db = loadDb();
+  const initialLen = db.users.length;
+  db.users = db.users.filter(u => u.id !== id);
+
+  if (db.users.length === initialLen) {
+    return res.status(404).json({ error: 'Usuário não encontrado.' });
+  }
+
+  saveDb(db);
+  return res.json({ success: true, message: 'Usuário excluído com sucesso.' });
+});
+
+// ==========================================================
 // ROTAS DE KANBAN
 // ==========================================
 
 // Retorna tarefas de Kanban
-app.get('/api/kanban', (req, res) => {
+app.get('/api/kanban', authenticate, (req: any, res: any) => {
   const db = loadDb();
-  const { userId } = req.query;
+  let { userId } = req.query;
+
+  // Se não for admin, NUNCA deixa consultar tarefas de outro usuário
+  if (req.user.role !== 'admin') {
+    userId = req.user.id;
+  }
 
   let filteredTasks = db.tasks;
   if (userId) {
@@ -346,10 +715,20 @@ app.get('/api/kanban', (req, res) => {
 });
 
 // Cria tarefa
-app.post('/api/kanban', (req, res) => {
-  const { title, description, status, userId, userName } = req.body;
-  if (!title || !userId || !userName) {
-    return res.status(400).json({ error: 'Título e Usuário do Kanban são obrigatórios.' });
+app.post('/api/kanban', authenticate, (req: any, res: any) => {
+  let { title, description, status, userId, userName } = req.body;
+  if (!title) {
+    return res.status(400).json({ error: 'Título do Kanban é obrigatório.' });
+  }
+
+  // Se não for admin, força os dados serem do próprio usuário logado
+  if (req.user.role !== 'admin') {
+    userId = req.user.id;
+    userName = req.user.name;
+  } else {
+    // Se for admin e não enviou, pega do próprio admin ou usa default
+    if (!userId) userId = req.user.id;
+    if (!userName) userName = req.user.name;
   }
 
   const db = loadDb();
@@ -370,7 +749,7 @@ app.post('/api/kanban', (req, res) => {
 });
 
 // Atualiza status ou campos de uma tarefa
-app.put('/api/kanban/:id', (req, res) => {
+app.put('/api/kanban/:id', authenticate, (req: any, res: any) => {
   const { id } = req.params;
   const { title, description, status } = req.body;
 
@@ -379,6 +758,11 @@ app.put('/api/kanban/:id', (req, res) => {
 
   if (taskIdx === -1) {
     return res.status(404).json({ error: 'Tarefa não encontrada.' });
+  }
+
+  // Se não for admin, o dono da tarefa DEVE ser o usuário que está editando
+  if (req.user.role !== 'admin' && db.tasks[taskIdx].userId !== req.user.id) {
+    return res.status(403).json({ error: 'Permissão negada. Você só pode modificar suas próprias tarefas.' });
   }
 
   if (title !== undefined) db.tasks[taskIdx].title = title;
@@ -390,25 +774,36 @@ app.put('/api/kanban/:id', (req, res) => {
 });
 
 // Deleta tarefa
-app.delete('/api/kanban/:id', (req, res) => {
+app.delete('/api/kanban/:id', authenticate, (req: any, res: any) => {
   const { id } = req.params;
   const db = loadDb();
-  const initialLen = db.tasks.length;
-  db.tasks = db.tasks.filter(t => t.id !== id);
+  const taskIdx = db.tasks.findIndex(t => t.id === id);
 
-  if (db.tasks.length === initialLen) {
+  if (taskIdx === -1) {
     return res.status(404).json({ error: 'Tarefa não encontrada.' });
   }
 
+  // Se não for admin, o dono da tarefa DEVE ser o usuário que está deletando
+  if (req.user.role !== 'admin' && db.tasks[taskIdx].userId !== req.user.id) {
+    return res.status(403).json({ error: 'Permissão negada. Você só pode deletar suas próprias tarefas.' });
+  }
+
+  db.tasks.splice(taskIdx, 1);
   saveDb(db);
   return res.json({ success: true });
 });
 
 // Encerrar o Dia (Limpa Concluídos e salva no Histórico com data)
-app.post('/api/kanban/close-day', (req, res) => {
-  const { userId, userName } = req.body;
-  if (!userId || !userName) {
-    return res.status(400).json({ error: 'Usuário é obrigatório para encerrar o dia.' });
+app.post('/api/kanban/close-day', authenticate, (req: any, res: any) => {
+  let { userId, userName } = req.body;
+
+  // Se não for admin, força para fechar as próprias tarefas
+  if (req.user.role !== 'admin') {
+    userId = req.user.id;
+    userName = req.user.name;
+  } else {
+    if (!userId) userId = req.user.id;
+    if (!userName) userName = req.user.name;
   }
 
   const db = loadDb();
@@ -447,9 +842,14 @@ app.post('/api/kanban/close-day', (req, res) => {
 });
 
 // Consultas de histórico por data
-app.get('/api/kanban/history', (req, res) => {
+app.get('/api/kanban/history', authenticate, (req: any, res: any) => {
   const db = loadDb();
-  const { date, userId } = req.query;
+  let { date, userId } = req.query;
+
+  // Se não for admin, força para buscar apenas o próprio histórico
+  if (req.user.role !== 'admin') {
+    userId = req.user.id;
+  }
 
   let filtered = db.history;
   
@@ -472,7 +872,7 @@ app.get('/api/kanban/history', (req, res) => {
 // ==========================================
 
 // Retorna mensalidades cadastradas para o mês solicitado (lazily instantiates if none exist for that month)
-app.get('/api/mensalidades', (req, res) => {
+app.get('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
   const db = loadDb();
   const { month } = req.query; // Ex: "2026-05"
 
@@ -504,7 +904,7 @@ app.get('/api/mensalidades', (req, res) => {
 });
 
 // Cadastra mensalidade recorrente (Cria Template + Instância do mês ativo)
-app.post('/api/mensalidades', (req, res) => {
+app.post('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
   const { name, value, dueDay, category, month } = req.body;
 
   if (!name || value === undefined || dueDay === undefined || !category) {
@@ -552,7 +952,7 @@ app.post('/api/mensalidades', (req, res) => {
 });
 
 // Atualiza mensalidade (status geral, valor etc.)
-app.put('/api/mensalidades/:id', (req, res) => {
+app.put('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
   const { id } = req.params;
   const { name, value, dueDay, category, status } = req.body;
 
@@ -600,7 +1000,7 @@ app.put('/api/mensalidades/:id', (req, res) => {
 });
 
 // Upload de boleto PDF (conclui ou muda status para concluído/aguardando boleto)
-app.post('/api/mensalidades/:id/upload', (req, res) => {
+app.post('/api/mensalidades/:id/upload', authenticate, requireAdmin, (req, res) => {
   const { id } = req.params;
 
   upload.single('file')(req, res, (err) => {
@@ -610,6 +1010,14 @@ app.post('/api/mensalidades/:id/upload', (req, res) => {
 
     if (!req.file) {
       return res.status(400).json({ error: 'Arquivo PDF não recebido.' });
+    }
+
+    // Validação profunda por cabeçalho mágico de assinatura binária (%PDF)
+    if (!isValidPdfBytes(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (e) {}
+      return res.status(400).json({ error: 'Segurança: O arquivo enviado possui extensão .pdf mas seu conteúdo binário interno não corresponde a um documento PDF legítimo.' });
     }
 
     const db = loadDb();
@@ -636,7 +1044,7 @@ app.post('/api/mensalidades/:id/upload', (req, res) => {
 });
 
 // Justificar falta de boleto (Justificado exige texto obrigatório)
-app.post('/api/mensalidades/:id/justify', (req, res) => {
+app.post('/api/mensalidades/:id/justify', authenticate, requireAdmin, (req, res) => {
   const { id } = req.params;
   const { justification } = req.body;
 
@@ -661,7 +1069,7 @@ app.post('/api/mensalidades/:id/justify', (req, res) => {
 });
 
 // Deletar mensalidade (Para a recorrência futura e remove a instância atual sem deletar histórico de outros meses)
-app.delete('/api/mensalidades/:id', (req, res) => {
+app.delete('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
   const { id } = req.params;
   const db = loadDb();
   
@@ -699,7 +1107,7 @@ app.delete('/api/mensalidades/:id', (req, res) => {
 // NOTIFICAÇÕES & CRIACAO DE ALERTAS (Vencimento)
 // ==========================================
 // O usuário solicitou avisar se a mensalidade está próxima, notificando 2 dias e 1 dia antes.
-app.get('/api/notifications', (req, res) => {
+app.get('/api/notifications', authenticate, (req, res) => {
   const db = loadDb();
   const currentDate = new Date();
   const currentDaysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
@@ -777,7 +1185,7 @@ app.get('/api/notifications', (req, res) => {
 // ==========================================
 
 // Retorna o lote padrão/ativo e histórico de lotes
-app.get('/api/chicks/batches', (req, res) => {
+app.get('/api/chicks/batches', authenticate, (req, res) => {
   const db = loadDb();
   // Ordena por data mais recente
   const sorted = [...db.batches].sort((a,b) => b.openedAt.localeCompare(a.openedAt));
@@ -785,7 +1193,7 @@ app.get('/api/chicks/batches', (req, res) => {
 });
 
 // Abre lote semanal manual
-app.post('/api/chicks/batch/open', (req, res) => {
+app.post('/api/chicks/batch/open', authenticate, (req, res) => {
   const { openedBy } = req.body;
   if (!openedBy) {
     return res.status(400).json({ error: 'Para abrir um lote é necessário identificar quem abriu.' });
@@ -826,7 +1234,7 @@ app.post('/api/chicks/batch/open', (req, res) => {
 });
 
 // Adiciona cliente e quantidades de espécies ao lote aberto
-app.post('/api/chicks/batch/order', (req, res) => {
+app.post('/api/chicks/batch/order', authenticate, (req, res) => {
   const { batchId, customerName, quantities, observation } = req.body;
   
   if (!batchId || !customerName || !quantities || !Array.isArray(quantities)) {
@@ -866,7 +1274,7 @@ app.post('/api/chicks/batch/order', (req, res) => {
 });
 
 // Exclui pedido de cliente do lote aberto
-app.delete('/api/chicks/batch/:batchId/order/:orderId', (req, res) => {
+app.delete('/api/chicks/batch/:batchId/order/:orderId', authenticate, (req, res) => {
   const { batchId, orderId } = req.params;
 
   const db = loadDb();
@@ -892,7 +1300,7 @@ app.delete('/api/chicks/batch/:batchId/order/:orderId', (req, res) => {
 });
 
 // Alterna status de entrega de um pedido de cliente (Registrado -> Entregue)
-app.put('/api/chicks/batch/:batchId/order/:orderId/deliver', (req, res) => {
+app.put('/api/chicks/batch/:batchId/order/:orderId/deliver', authenticate, (req, res) => {
   const { batchId, orderId } = req.params;
   const { status } = req.body; // 'registered' | 'delivered'
 
@@ -915,7 +1323,7 @@ app.put('/api/chicks/batch/:batchId/order/:orderId/deliver', (req, res) => {
 });
 
 // Finaliza o lote atual
-app.post('/api/chicks/batch/:batchId/finalize', (req, res) => {
+app.post('/api/chicks/batch/:batchId/finalize', authenticate, (req, res) => {
   const { batchId } = req.params;
 
   const db = loadDb();
@@ -942,7 +1350,7 @@ app.post('/api/chicks/batch/:batchId/finalize', (req, res) => {
 // ==========================================
 
 // Retorna todas as espécies cadastradas
-app.get('/api/chicks/breeds', (req, res) => {
+app.get('/api/chicks/breeds', authenticate, (req, res) => {
   const db = loadDb();
   if (!db.breeds) {
     db.breeds = [
@@ -958,7 +1366,7 @@ app.get('/api/chicks/breeds', (req, res) => {
 });
 
 // Cadastra uma nova espécie de pinto
-app.post('/api/chicks/breeds', (req, res) => {
+app.post('/api/chicks/breeds', authenticate, (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'O nome da espécie é obrigatório!' });
@@ -978,7 +1386,7 @@ app.post('/api/chicks/breeds', (req, res) => {
 });
 
 // Exclui uma espécie, mas apenas se todos os clientes correspondentes estiverem 'delivered' (status: ENTREGUE)
-app.delete('/api/chicks/breeds/:name', (req, res) => {
+app.delete('/api/chicks/breeds/:name', authenticate, (req, res) => {
   const { name } = req.params;
   const db = loadDb();
 
@@ -1012,8 +1420,13 @@ app.delete('/api/chicks/breeds/:name', (req, res) => {
 // ==========================================
 // ROTA ADICIONAL KANBAN DE REABRIR DIA
 // ==========================================
-app.post('/api/kanban/reopen-day', (req, res) => {
-  const { userId, date } = req.body;
+app.post('/api/kanban/reopen-day', authenticate, (req: any, res: any) => {
+  let { userId, date } = req.body;
+  
+  if (req.user.role !== 'admin') {
+    userId = req.user.id;
+  }
+
   if (!userId) {
     return res.status(400).json({ error: 'Usuário é obrigatório para reabrir o dia.' });
   }
