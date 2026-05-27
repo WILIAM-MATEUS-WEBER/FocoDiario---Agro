@@ -4,8 +4,7 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
 import crypto from 'crypto';
-import pg from 'pg';
-const { Pool } = pg;
+import { sql } from '@vercel/postgres';
 import { 
   UserRole, 
   User, 
@@ -26,29 +25,9 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Configuração de Conexão com PostgreSQL (seja Vercel Postgres ou DATABASE_URL padrão)
-// Dá preferência para o parãmetro de conexão securitizado do Vercel
-const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-let pool: pg.Pool | null = null;
-
-if (connectionString) {
-  console.log('PostgreSQL detectado! Inicializando conexão segura com o banco...');
-  pool = new Pool({
-    connectionString,
-    ssl: {
-      rejectUnauthorized: false // Essencial para conexões seguras de servidores de hospedagem como Vercel/Neon
-    }
-  });
-}
-
-// Diretorios necessarios para o sistema (fallback local se necessário)
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Diretorios necessarios para o sistema (fallback local para uploads de arquivos)
 const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
-const DB_FILE = path.join(DATA_DIR, 'focodiario_db.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
@@ -246,83 +225,23 @@ const defaultDb: DatabaseSchema = {
   ]
 };
 
-// Funções utilitárias de carga/escrita do arquivo local
+// Funções de inicialização e persistência no Vercel Postgres com Fallback Local Inteligente
+const DATA_DIR = path.join(process.cwd(), 'data');
+const DB_FILE = path.join(DATA_DIR, 'focodiario_db.json');
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
 function loadDbFromFile(): DatabaseSchema {
   try {
     if (fs.existsSync(DB_FILE)) {
       const data = fs.readFileSync(DB_FILE, 'utf8');
-      const db: DatabaseSchema = JSON.parse(data);
-      
-      let changed = false;
-
-      // Se não há breeds no DB legado, cria-os com a lista padrão
-      if (!db.breeds) {
-        db.breeds = [
-          'Pinto de Corte (Frango / Pesado)',
-          'Pinto de Postura (Poedeira de Ovos)',
-          'Pinto Carijó Especial',
-          'Pinto Caipira Colonial',
-          'Pinto Pescoço Pelado Caipira',
-          'Pinto de Angola (Tô Fraco)'
-        ];
-        changed = true;
-      }
-
-      // Se não há mensalidadesTemplates no DB legado, cria-os
-      if (!db.mensalidadesTemplates) {
-        db.mensalidadesTemplates = [];
-        changed = true;
-      }
-
-      const currentMonth = new Date().toISOString().substring(0, 7); // Ex: "2026-05"
-
-      // Se gabarito de templates estiver vazio, inicializa a partir de mensalidades legadas ou padrão 
-      if (db.mensalidadesTemplates.length === 0) {
-        if (db.mensalidades && db.mensalidades.length > 0) {
-          db.mensalidadesTemplates = db.mensalidades.map((m, index) => ({
-            id: `t-${index + 1}-${Date.now()}`,
-            name: m.name,
-            value: m.value,
-            dueDay: m.dueDay,
-            category: m.category,
-            createdAt: new Date().toISOString()
-          }));
-        } else {
-          db.mensalidadesTemplates = [
-            { id: 't-1', name: 'Internet da Agropecuária', value: 150.00, dueDay: 10, category: 'Utilidades', createdAt: new Date().toISOString() },
-            { id: 't-2', name: 'Energia Elétrica Copel', value: 850.45, dueDay: 15, category: 'Insumos', createdAt: new Date().toISOString() },
-            { id: 't-3', name: 'Sistema de Emissão Fiscal', value: 299.90, dueDay: 28, category: 'Software/Tecnologia', createdAt: new Date().toISOString() }
-          ];
-        }
-        changed = true;
-      }
-
-      // Garante que todas as mensalidades atuais no banco têm 'month' definido
-      if (db.mensalidades && db.mensalidades.length > 0) {
-        db.mensalidades.forEach(m => {
-          if (!m.month) {
-            m.month = currentMonth;
-            if (!m.templateId && db.mensalidadesTemplates) {
-              const matched = db.mensalidadesTemplates.find(t => t.name === m.name);
-              if (matched) {
-                m.templateId = matched.id;
-              }
-            }
-            changed = true;
-          }
-        });
-      }
-
-      if (changed) {
-        saveDbToFile(db);
-      }
-      return db;
+      return JSON.parse(data);
     }
   } catch (error) {
-    console.error('Erro ao ler banco de dados JSON:', error);
+    console.error('Erro ao ler banco de dados local:', error);
   }
-  
-  // Se não houver arquivo, cria o default alimentado com instâncias para o mês atual
   const currentMonth = new Date().toISOString().substring(0, 7);
   const initialDb: DatabaseSchema = {
     ...defaultDb,
@@ -345,134 +264,107 @@ function saveDbToFile(db: DatabaseSchema) {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
   } catch (error) {
-    console.error('Erro ao salvar banco de dados JSON:', error);
+    console.error('Erro ao salvar banco de dados local:', error);
   }
 }
 
-// Inicializa a tabela focodiario_state no PostgreSQL caso conectando ao banco pela primeira vez
-async function initPostgresDb() {
-  if (!pool) return;
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS focodiario_state (
-          id INT PRIMARY KEY,
-          data JSONB,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-      
-      const checkRes = await client.query('SELECT COUNT(*) FROM focodiario_state WHERE id = 1;');
-      if (parseInt(checkRes.rows[0].count, 10) === 0) {
-        const currentMonth = new Date().toISOString().substring(0, 7);
-        const initialDb: DatabaseSchema = {
-          ...defaultDb,
-          mensalidades: (defaultDb.mensalidadesTemplates || []).map(t => ({
-            id: `m-${Date.now()}-${t.id}-${Math.floor(Math.random() * 1000)}`,
-            templateId: t.id,
-            name: t.name,
-            value: t.value,
-            dueDay: t.dueDay,
-            category: t.category,
-            status: 'pending',
-            month: currentMonth
-          }))
-        };
-        await client.query(
-          'INSERT INTO focodiario_state (id, data) VALUES ($1, $2);',
-          [1, JSON.stringify(initialDb)]
-        );
-        console.log('Tabela de estado persistente criada no PostgreSQL com as credenciais iniciais.');
-      } else {
-        console.log('Banco PostgreSQL conectado e verificado com sucesso.');
-      }
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    console.error('Falha de inicialização no PostgreSQL:', err);
-  }
-}
-
-// Estado em memória (cached) para servir requisições de forma ultrarrápida
 let cachedDb: DatabaseSchema | null = null;
 
-function loadDb(): DatabaseSchema {
-  if (cachedDb) return cachedDb;
-  return loadDbFromFile();
+async function initPostgresDb() {
+  const isPostgresEnabled = !!(process.env.POSTGRES_URL || process.env.DATABASE_URL);
+  if (!isPostgresEnabled) {
+    console.log('PostgreSQL não detectado no ambiente atual. Iniciando em Modo Local Persistente (JSON).');
+    return;
+  }
+  try {
+    await sql`CREATE TABLE IF NOT EXISTS app_storage (id VARCHAR(20) PRIMARY KEY, db_state JSONB);`;
+    console.log('Tabela app_storage garantida no Vercel Postgres.');
+  } catch (err) {
+    console.error('Falha de inicialização no Vercel Postgres:', err);
+  }
 }
 
-function saveDb(db: DatabaseSchema) {
+async function loadDb(): Promise<DatabaseSchema> {
+  const isPostgresEnabled = !!(process.env.POSTGRES_URL || process.env.DATABASE_URL);
+  if (!isPostgresEnabled) {
+    if (cachedDb) return cachedDb;
+    cachedDb = loadDbFromFile();
+    return cachedDb;
+  }
+
+  try {
+    const { rows } = await sql`SELECT db_state FROM app_storage WHERE id = 'focodiario' LIMIT 1;`;
+    if (rows && rows.length > 0) {
+      const db = rows[0].db_state as DatabaseSchema;
+      
+      // Sanitizações de campos para garantir migrações antigas de forma segura
+      let changed = false;
+      if (!db.breeds) {
+        db.breeds = [
+          'Pinto de Corte (Frango / Pesado)',
+          'Pinto de Postura (Poedeira de Ovos)',
+          'Pinto Carijó Especial',
+          'Pinto Caipira Colonial',
+          'Pinto Pescoço Pelado Caipira',
+          'Pinto de Angola (Tô Fraco)'
+        ];
+        changed = true;
+      }
+      if (!db.mensalidadesTemplates) {
+        db.mensalidadesTemplates = [];
+        changed = true;
+      }
+      if (changed) {
+        await saveDb(db);
+      }
+      return db;
+    }
+  } catch (err) {
+    console.error('Erro de leitura no Vercel Postgres. Tentando fallback local...', err);
+  }
+
+  // Se não existir ou ocorrer falha na leitura inicial, insere o defaultDb e retorna ele
+  const currentMonth = new Date().toISOString().substring(0, 7);
+  const initialDb: DatabaseSchema = {
+    ...defaultDb,
+    mensalidades: (defaultDb.mensalidadesTemplates || []).map(t => ({
+      id: `m-${Date.now()}-${t.id}-${Math.floor(Math.random() * 1000)}`,
+      templateId: t.id,
+      name: t.name,
+      value: t.value,
+      dueDay: t.dueDay,
+      category: t.category,
+      status: 'pending',
+      month: currentMonth
+    }))
+  };
+  try {
+    await sql`INSERT INTO app_storage (id, db_state) VALUES ('focodiario', ${JSON.stringify(initialDb)});`;
+  } catch (e) {
+    console.error('Falha ao inserir estado default no Vercel Postgres:', e);
+  }
+  return initialDb;
+}
+
+async function saveDb(db: DatabaseSchema): Promise<void> {
   cachedDb = db;
-  saveDbToFile(db);
-  
-  if (pool) {
-    const syncPromise = pool.query(
-      'INSERT INTO focodiario_state (id, data, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP;',
-      [1, JSON.stringify(db)]
-    ).catch((err: any) => {
-      console.error('Erro de sincronização assíncrona com PostgreSQL:', err);
-    });
+  const isPostgresEnabled = !!(process.env.POSTGRES_URL || process.env.DATABASE_URL);
+  if (!isPostgresEnabled) {
+    saveDbToFile(db);
+    return;
+  }
 
-    const activeReq = (global as any).currentExpressRequest;
-    if (activeReq && typeof activeReq.trackWrite === 'function') {
-      activeReq.trackWrite(syncPromise);
-    }
+  try {
+    await sql.query('UPDATE app_storage SET db_state = $1 WHERE id = \'focodiario\'', [JSON.stringify(db)]);
+  } catch (error) {
+    console.error('Erro ao atualizar banco de dados no Vercel Postgres:', error);
   }
 }
 
-// Registra interceptor de requisições do Express para sincronizar dados Postgres
-app.use(async (req: any, res: any, next: any) => {
-  (global as any).currentExpressRequest = req;
-
-  const originalJson = res.json;
-  const pendingWrites: Array<Promise<any>> = [];
-
-  req.trackWrite = (promise: Promise<any>) => {
-    pendingWrites.push(promise);
-  };
-
-  res.json = async function(data: any) {
-    if (pendingWrites.length > 0) {
-      await Promise.all(pendingWrites).catch(err => {
-        console.error('Erro ao aguardar conclusões de escrita pendentes no Postgres:', err);
-      });
-    }
-    return originalJson.call(res, data);
-  };
-
-  if (pool) {
-    try {
-      const dbResult = await pool.query('SELECT data FROM focodiario_state WHERE id = 1 LIMIT 1;');
-      if (dbResult.rows && dbResult.rows.length > 0) {
-        cachedDb = dbResult.rows[0].data;
-      }
-    } catch (err) {
-      console.error('Erro ao carregar dados do Postgres para a requisição. Usando backup local em cache:', err);
-    }
-  }
-
-  next();
+// Inicializa a tabela focodiario no PostgreSQL logo na inicialização
+initPostgresDb().catch(err => {
+  console.error('Erro ao chamar initPostgresDb na inicialização:', err);
 });
-
-// Inicialização imediata
-if (pool) {
-  initPostgresDb().then(async () => {
-    try {
-      const dbResult = await pool.query('SELECT data FROM focodiario_state WHERE id = 1 LIMIT 1;');
-      if (dbResult.rows && dbResult.rows.length > 0) {
-        cachedDb = dbResult.rows[0].data;
-        console.log('Cache inicial de dados Postgres preenchido com sucesso.');
-      }
-    } catch (e) {
-      console.log('Falha ao obter cache inicial Postgres. Utilizando arquivo local.');
-      cachedDb = loadDbFromFile();
-    }
-  });
-} else {
-  loadDb();
-}
 
 
 // Configuração do Multer para upload restrito a PDF (validado server-side)
@@ -508,13 +400,13 @@ const upload = multer({
 // ROTAS DE AUTENTICAÇÃO
 // ==========================================
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Preencha o usuário e a senha.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const foundUser = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
 
   if (!foundUser) {
@@ -541,13 +433,13 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // Novo registro de usuário (Admin Only)
-app.post('/api/auth/register', authenticate, requireAdmin, (req, res) => {
+app.post('/api/auth/register', authenticate, requireAdmin, async (req, res) => {
   const { username, password, name, role } = req.body;
   if (!username || !password || !name || !role) {
     return res.status(400).json({ error: 'Todos os campos são obrigatórios para registrar usuário.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const exists = db.users.some(u => u.username.toLowerCase() === username.toLowerCase());
   if (exists) {
     return res.status(400).json({ error: 'Nome de usuário já existe.' });
@@ -564,7 +456,7 @@ app.post('/api/auth/register', authenticate, requireAdmin, (req, res) => {
   };
 
   db.users.push(newUser);
-  saveDb(db);
+  await saveDb(db);
 
   return res.json({
     id: newUser.id,
@@ -579,8 +471,8 @@ app.post('/api/auth/register', authenticate, requireAdmin, (req, res) => {
 // ==========================================
 
 // Listar todos os usuários (Sem hashes/salts por segurança)
-app.get('/api/users', authenticate, requireAdmin, (req, res) => {
-  const db = loadDb();
+app.get('/api/users', authenticate, requireAdmin, async (req, res) => {
+  const db = await loadDb();
   const safeUsers = db.users.map(u => ({
     id: u.id,
     username: u.username,
@@ -591,13 +483,13 @@ app.get('/api/users', authenticate, requireAdmin, (req, res) => {
 });
 
 // Criar novo usuário (Admin Only)
-app.post('/api/users', authenticate, requireAdmin, (req, res) => {
+app.post('/api/users', authenticate, requireAdmin, async (req, res) => {
   const { username, password, name, role } = req.body;
   if (!username || !password || !name || !role) {
     return res.status(400).json({ error: 'Todos os campos são obrigatórios para registrar um novo usuário.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const exists = db.users.some(u => u.username.toLowerCase() === username.toLowerCase());
   if (exists) {
     return res.status(400).json({ error: 'Este nome de usuário já está sendo utilizado.' });
@@ -614,7 +506,7 @@ app.post('/api/users', authenticate, requireAdmin, (req, res) => {
   };
 
   db.users.push(newUser);
-  saveDb(db);
+  await saveDb(db);
 
   return res.json({
     id: newUser.id,
@@ -625,11 +517,11 @@ app.post('/api/users', authenticate, requireAdmin, (req, res) => {
 });
 
 // Editar usuário (Admin Only) - Altera nome, login, função e senha (se enviada)
-app.put('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) => {
+app.put('/api/users/:id', authenticate, requireAdmin, async (req: any, res: any) => {
   const { id } = req.params;
   const { username, password, name, role } = req.body;
 
-  const db = loadDb();
+  const db = await loadDb();
   const userIdx = db.users.findIndex(u => u.id === id);
   if (userIdx === -1) {
     return res.status(404).json({ error: 'Usuário não encontrado.' });
@@ -662,7 +554,7 @@ app.put('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) => {
     targetUser.passwordHash = hashPassword(password, salt);
   }
 
-  saveDb(db);
+  await saveDb(db);
 
   return res.json({
     id: targetUser.id,
@@ -673,7 +565,7 @@ app.put('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) => {
 });
 
 // Excluir usuário (Admin Only)
-app.delete('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) => {
+app.delete('/api/users/:id', authenticate, requireAdmin, async (req: any, res: any) => {
   const { id } = req.params;
 
   // Impede que o próprio usuário administrador se exclua do sistema
@@ -681,7 +573,7 @@ app.delete('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) =>
     return res.status(400).json({ error: 'Segurança: Você não pode remover sua própria conta estando conectado a ela.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const initialLen = db.users.length;
   db.users = db.users.filter(u => u.id !== id);
 
@@ -689,7 +581,7 @@ app.delete('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) =>
     return res.status(404).json({ error: 'Usuário não encontrado.' });
   }
 
-  saveDb(db);
+  await saveDb(db);
   return res.json({ success: true, message: 'Usuário excluído com sucesso.' });
 });
 
@@ -698,8 +590,8 @@ app.delete('/api/users/:id', authenticate, requireAdmin, (req: any, res: any) =>
 // ==========================================
 
 // Retorna tarefas de Kanban
-app.get('/api/kanban', authenticate, (req: any, res: any) => {
-  const db = loadDb();
+app.get('/api/kanban', authenticate, async (req: any, res: any) => {
+  const db = await loadDb();
   let { userId } = req.query;
 
   // Se não for admin, NUNCA deixa consultar tarefas de outro usuário
@@ -715,7 +607,7 @@ app.get('/api/kanban', authenticate, (req: any, res: any) => {
 });
 
 // Cria tarefa
-app.post('/api/kanban', authenticate, (req: any, res: any) => {
+app.post('/api/kanban', authenticate, async (req: any, res: any) => {
   let { title, description, status, userId, userName } = req.body;
   if (!title) {
     return res.status(400).json({ error: 'Título do Kanban é obrigatório.' });
@@ -731,7 +623,7 @@ app.post('/api/kanban', authenticate, (req: any, res: any) => {
     if (!userName) userName = req.user.name;
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const newTask: KanbanTask = {
     id: `task-${Date.now()}`,
     title,
@@ -743,17 +635,17 @@ app.post('/api/kanban', authenticate, (req: any, res: any) => {
   };
 
   db.tasks.push(newTask);
-  saveDb(db);
+  await saveDb(db);
 
   return res.json(newTask);
 });
 
 // Atualiza status ou campos de uma tarefa
-app.put('/api/kanban/:id', authenticate, (req: any, res: any) => {
+app.put('/api/kanban/:id', authenticate, async (req: any, res: any) => {
   const { id } = req.params;
   const { title, description, status } = req.body;
 
-  const db = loadDb();
+  const db = await loadDb();
   const taskIdx = db.tasks.findIndex(t => t.id === id);
 
   if (taskIdx === -1) {
@@ -769,14 +661,14 @@ app.put('/api/kanban/:id', authenticate, (req: any, res: any) => {
   if (description !== undefined) db.tasks[taskIdx].description = description;
   if (status !== undefined) db.tasks[taskIdx].status = status as TaskStatus;
 
-  saveDb(db);
+  await saveDb(db);
   return res.json(db.tasks[taskIdx]);
 });
 
 // Deleta tarefa
-app.delete('/api/kanban/:id', authenticate, (req: any, res: any) => {
+app.delete('/api/kanban/:id', authenticate, async (req: any, res: any) => {
   const { id } = req.params;
-  const db = loadDb();
+  const db = await loadDb();
   const taskIdx = db.tasks.findIndex(t => t.id === id);
 
   if (taskIdx === -1) {
@@ -789,12 +681,12 @@ app.delete('/api/kanban/:id', authenticate, (req: any, res: any) => {
   }
 
   db.tasks.splice(taskIdx, 1);
-  saveDb(db);
+  await saveDb(db);
   return res.json({ success: true });
 });
 
 // Encerrar o Dia (Limpa Concluídos e salva no Histórico com data)
-app.post('/api/kanban/close-day', authenticate, (req: any, res: any) => {
+app.post('/api/kanban/close-day', authenticate, async (req: any, res: any) => {
   let { userId, userName } = req.body;
 
   // Se não for admin, força para fechar as próprias tarefas
@@ -806,7 +698,7 @@ app.post('/api/kanban/close-day', authenticate, (req: any, res: any) => {
     if (!userName) userName = req.user.name;
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   
   // Pegar tarefas concluidas deste usuario
   const completedTasksOfUser = db.tasks.filter(t => t.userId === userId && t.status === 'completed');
@@ -836,14 +728,14 @@ app.post('/api/kanban/close-day', authenticate, (req: any, res: any) => {
   // Remover tarefas concluidas deste usuario do Kanban ativo
   db.tasks = db.tasks.filter(t => !(t.userId === userId && t.status === 'completed'));
 
-  saveDb(db);
+  await saveDb(db);
 
   return res.json({ success: true, historyEntry });
 });
 
 // Consultas de histórico por data
-app.get('/api/kanban/history', authenticate, (req: any, res: any) => {
-  const db = loadDb();
+app.get('/api/kanban/history', authenticate, async (req: any, res: any) => {
+  const db = await loadDb();
   let { date, userId } = req.query;
 
   // Se não for admin, força para buscar apenas o próprio histórico
@@ -872,8 +764,8 @@ app.get('/api/kanban/history', authenticate, (req: any, res: any) => {
 // ==========================================
 
 // Retorna mensalidades cadastradas para o mês solicitado (lazily instantiates if none exist for that month)
-app.get('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
-  const db = loadDb();
+app.get('/api/mensalidades', authenticate, requireAdmin, async (req, res) => {
+  const db = await loadDb();
   const { month } = req.query; // Ex: "2026-05"
 
   const targetMonth = typeof month === 'string' ? month : new Date().toISOString().substring(0, 7);
@@ -896,7 +788,7 @@ app.get('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
     }));
     
     db.mensalidades.push(...newInstances);
-    saveDb(db);
+    await saveDb(db);
     monthlyBills = newInstances;
   }
   
@@ -904,7 +796,7 @@ app.get('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
 });
 
 // Cadastra mensalidade recorrente (Cria Template + Instância do mês ativo)
-app.post('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
+app.post('/api/mensalidades', authenticate, requireAdmin, async (req, res) => {
   const { name, value, dueDay, category, month } = req.body;
 
   if (!name || value === undefined || dueDay === undefined || !category) {
@@ -916,7 +808,7 @@ app.post('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'O dia do vencimento deve ser de 1 a 31.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   if (!db.mensalidadesTemplates) {
     db.mensalidadesTemplates = [];
   }
@@ -933,7 +825,7 @@ app.post('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
   };
   db.mensalidadesTemplates.push(newTemplate);
 
-  // Cria a instancia correspondente para o mês selecionado (ou o mês corrente)
+  // Cria a instancia correspondente para o mês selecionado (or o mês corrente)
   const targetMonth = typeof month === 'string' ? month : new Date().toISOString().substring(0, 7);
   const newInstance: Mensalidade = {
     id: `m-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -947,16 +839,16 @@ app.post('/api/mensalidades', authenticate, requireAdmin, (req, res) => {
   };
   db.mensalidades.push(newInstance);
 
-  saveDb(db);
+  await saveDb(db);
   return res.json(newInstance);
 });
 
 // Atualiza mensalidade (status geral, valor etc.)
-app.put('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
+app.put('/api/mensalidades/:id', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { name, value, dueDay, category, status } = req.body;
 
-  const db = loadDb();
+  const db = await loadDb();
   const idx = db.mensalidades.findIndex(m => m.id === id);
 
   if (idx === -1) {
@@ -995,15 +887,15 @@ app.put('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
     }
   }
 
-  saveDb(db);
+  await saveDb(db);
   return res.json(instance);
 });
 
 // Upload de boleto PDF (conclui ou muda status para concluído/aguardando boleto)
-app.post('/api/mensalidades/:id/upload', authenticate, requireAdmin, (req, res) => {
+app.post('/api/mensalidades/:id/upload', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
 
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err) {
       return res.status(400).json({ error: err.message });
     }
@@ -1020,7 +912,7 @@ app.post('/api/mensalidades/:id/upload', authenticate, requireAdmin, (req, res) 
       return res.status(400).json({ error: 'Segurança: O arquivo enviado possui extensão .pdf mas seu conteúdo binário interno não corresponde a um documento PDF legítimo.' });
     }
 
-    const db = loadDb();
+    const db = await loadDb();
     const idx = db.mensalidades.findIndex(m => m.id === id);
 
     if (idx === -1) {
@@ -1038,13 +930,13 @@ app.post('/api/mensalidades/:id/upload', authenticate, requireAdmin, (req, res) 
     db.mensalidades[idx].justification = undefined; // Limpa justificativa anterior se houver
     db.mensalidades[idx].lastUpdated = new Date().toISOString();
 
-    saveDb(db);
+    await saveDb(db);
     return res.json(db.mensalidades[idx]);
   });
 });
 
 // Justificar falta de boleto (Justificado exige texto obrigatório)
-app.post('/api/mensalidades/:id/justify', authenticate, requireAdmin, (req, res) => {
+app.post('/api/mensalidades/:id/justify', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { justification } = req.body;
 
@@ -1052,7 +944,7 @@ app.post('/api/mensalidades/:id/justify', authenticate, requireAdmin, (req, res)
     return res.status(400).json({ error: 'A justificativa explicativa é obrigatória.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const idx = db.mensalidades.findIndex(m => m.id === id);
 
   if (idx === -1) {
@@ -1064,14 +956,14 @@ app.post('/api/mensalidades/:id/justify', authenticate, requireAdmin, (req, res)
   db.mensalidades[idx].pdfUrl = undefined; // Limpa pdf anterior se houver
   db.mensalidades[idx].lastUpdated = new Date().toISOString();
 
-  saveDb(db);
+  await saveDb(db);
   return res.json(db.mensalidades[idx]);
 });
 
 // Deletar mensalidade (Para a recorrência futura e remove a instância atual sem deletar histórico de outros meses)
-app.delete('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
+app.delete('/api/mensalidades/:id', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
-  const db = loadDb();
+  const db = await loadDb();
   
   const recordIndex = db.mensalidades.findIndex(m => m.id === id);
   if (recordIndex === -1) {
@@ -1098,7 +990,7 @@ app.delete('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
   // Deleta do mês corrente
   db.mensalidades = db.mensalidades.filter(m => m.id !== id);
 
-  saveDb(db);
+  await saveDb(db);
   return res.json({ success: true, message: 'Mensalidade e recorrência futura excluídas com sucesso. Histórico de meses passados preservado.' });
 });
 
@@ -1107,8 +999,8 @@ app.delete('/api/mensalidades/:id', authenticate, requireAdmin, (req, res) => {
 // NOTIFICAÇÕES & CRIACAO DE ALERTAS (Vencimento)
 // ==========================================
 // O usuário solicitou avisar se a mensalidade está próxima, notificando 2 dias e 1 dia antes.
-app.get('/api/notifications', authenticate, (req, res) => {
-  const db = loadDb();
+app.get('/api/notifications', authenticate, async (req, res) => {
+  const db = await loadDb();
   const currentDate = new Date();
   const currentDaysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
   const todayNum = currentDate.getDate();
@@ -1185,21 +1077,21 @@ app.get('/api/notifications', authenticate, (req, res) => {
 // ==========================================
 
 // Retorna o lote padrão/ativo e histórico de lotes
-app.get('/api/chicks/batches', authenticate, (req, res) => {
-  const db = loadDb();
+app.get('/api/chicks/batches', authenticate, async (req, res) => {
+  const db = await loadDb();
   // Ordena por data mais recente
   const sorted = [...db.batches].sort((a,b) => b.openedAt.localeCompare(a.openedAt));
   return res.json(sorted);
 });
 
 // Abre lote semanal manual
-app.post('/api/chicks/batch/open', authenticate, (req, res) => {
+app.post('/api/chicks/batch/open', authenticate, async (req, res) => {
   const { openedBy } = req.body;
   if (!openedBy) {
     return res.status(400).json({ error: 'Para abrir um lote é necessário identificar quem abriu.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   
   // Só pode haver 1 lote aberto por vez
   const openBatchExists = db.batches.some(b => b.status === 'open');
@@ -1228,20 +1120,20 @@ app.post('/api/chicks/batch/open', authenticate, (req, res) => {
   };
 
   db.batches.push(newBatch);
-  saveDb(db);
+  await saveDb(db);
 
   return res.json(newBatch);
 });
 
 // Adiciona cliente e quantidades de espécies ao lote aberto
-app.post('/api/chicks/batch/order', authenticate, (req, res) => {
+app.post('/api/chicks/batch/order', authenticate, async (req, res) => {
   const { batchId, customerName, quantities, observation } = req.body;
   
   if (!batchId || !customerName || !quantities || !Array.isArray(quantities)) {
     return res.status(400).json({ error: 'Dados incompletos para registrar o pedido do cliente.' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   const batchIdx = db.batches.findIndex(b => b.id === batchId);
 
   if (batchIdx === -1) {
@@ -1268,16 +1160,16 @@ app.post('/api/chicks/batch/order', authenticate, (req, res) => {
   };
 
   db.batches[batchIdx].orders.push(newOrder);
-  saveDb(db);
+  await saveDb(db);
 
   return res.json(db.batches[batchIdx]);
 });
 
 // Exclui pedido de cliente do lote aberto
-app.delete('/api/chicks/batch/:batchId/order/:orderId', authenticate, (req, res) => {
+app.delete('/api/chicks/batch/:batchId/order/:orderId', authenticate, async (req, res) => {
   const { batchId, orderId } = req.params;
 
-  const db = loadDb();
+  const db = await loadDb();
   const batchIdx = db.batches.findIndex(b => b.id === batchId);
 
   if (batchIdx === -1) {
@@ -1295,16 +1187,16 @@ app.delete('/api/chicks/batch/:batchId/order/:orderId', authenticate, (req, res)
     return res.status(404).json({ error: 'Pedido do cliente não encontrado.' });
   }
 
-  saveDb(db);
+  await saveDb(db);
   return res.json(db.batches[batchIdx]);
 });
 
 // Alterna status de entrega de um pedido de cliente (Registrado -> Entregue)
-app.put('/api/chicks/batch/:batchId/order/:orderId/deliver', authenticate, (req, res) => {
+app.put('/api/chicks/batch/:batchId/order/:orderId/deliver', authenticate, async (req, res) => {
   const { batchId, orderId } = req.params;
   const { status } = req.body; // 'registered' | 'delivered'
 
-  const db = loadDb();
+  const db = await loadDb();
   const batchIdx = db.batches.findIndex(b => b.id === batchId);
 
   if (batchIdx === -1) {
@@ -1317,16 +1209,16 @@ app.put('/api/chicks/batch/:batchId/order/:orderId/deliver', authenticate, (req,
   }
 
   db.batches[batchIdx].orders[orderIdx].status = (status || 'delivered') as CustomerOrderStatus;
-  saveDb(db);
+  await saveDb(db);
 
   return res.json(db.batches[batchIdx]);
 });
 
 // Finaliza o lote atual
-app.post('/api/chicks/batch/:batchId/finalize', authenticate, (req, res) => {
+app.post('/api/chicks/batch/:batchId/finalize', authenticate, async (req, res) => {
   const { batchId } = req.params;
 
-  const db = loadDb();
+  const db = await loadDb();
   const batchIdx = db.batches.findIndex(b => b.id === batchId);
 
   if (batchIdx === -1) {
@@ -1340,7 +1232,7 @@ app.post('/api/chicks/batch/:batchId/finalize', authenticate, (req, res) => {
   db.batches[batchIdx].status = 'finalized';
   db.batches[batchIdx].finalizedAt = new Date().toISOString();
 
-  saveDb(db);
+  await saveDb(db);
   return res.json(db.batches[batchIdx]);
 });
 
@@ -1350,8 +1242,8 @@ app.post('/api/chicks/batch/:batchId/finalize', authenticate, (req, res) => {
 // ==========================================
 
 // Retorna todas as espécies cadastradas
-app.get('/api/chicks/breeds', authenticate, (req, res) => {
-  const db = loadDb();
+app.get('/api/chicks/breeds', authenticate, async (req, res) => {
+  const db = await loadDb();
   if (!db.breeds) {
     db.breeds = [
       'Pinto de Corte (Frango / Pesado)',
@@ -1366,13 +1258,13 @@ app.get('/api/chicks/breeds', authenticate, (req, res) => {
 });
 
 // Cadastra uma nova espécie de pinto
-app.post('/api/chicks/breeds', authenticate, (req, res) => {
+app.post('/api/chicks/breeds', authenticate, async (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'O nome da espécie é obrigatório!' });
   }
 
-  const db = loadDb();
+  const db = await loadDb();
   if (!db.breeds) db.breeds = [];
 
   const trimmedName = name.trim();
@@ -1381,14 +1273,14 @@ app.post('/api/chicks/breeds', authenticate, (req, res) => {
   }
 
   db.breeds.push(trimmedName);
-  saveDb(db);
+  await saveDb(db);
   return res.json({ success: true, breeds: db.breeds });
 });
 
 // Exclui uma espécie, mas apenas se todos os clientes correspondentes estiverem 'delivered' (status: ENTREGUE)
-app.delete('/api/chicks/breeds/:name', authenticate, (req, res) => {
+app.delete('/api/chicks/breeds/:name', authenticate, async (req, res) => {
   const { name } = req.params;
-  const db = loadDb();
+  const db = await loadDb();
 
   if (!db.breeds) {
     db.breeds = [];
@@ -1412,7 +1304,7 @@ app.delete('/api/chicks/breeds/:name', authenticate, (req, res) => {
   }
 
   db.breeds = db.breeds.filter(b => b !== name);
-  saveDb(db);
+  await saveDb(db);
   return res.json({ success: true, breeds: db.breeds });
 });
 
@@ -1420,7 +1312,7 @@ app.delete('/api/chicks/breeds/:name', authenticate, (req, res) => {
 // ==========================================
 // ROTA ADICIONAL KANBAN DE REABRIR DIA
 // ==========================================
-app.post('/api/kanban/reopen-day', authenticate, (req: any, res: any) => {
+app.post('/api/kanban/reopen-day', authenticate, async (req: any, res: any) => {
   let { userId, date } = req.body;
   
   if (req.user.role !== 'admin') {
@@ -1432,7 +1324,7 @@ app.post('/api/kanban/reopen-day', authenticate, (req: any, res: any) => {
   }
 
   const targetDate = date || new Date().toISOString().split('T')[0];
-  const db = loadDb();
+  const db = await loadDb();
 
   // Encontra a entrada do histórico correspondente a esse usuário e data
   const historyIdx = db.history.findIndex(h => h.userId === userId && h.date === targetDate);
@@ -1458,7 +1350,7 @@ app.post('/api/kanban/reopen-day', authenticate, (req: any, res: any) => {
 
   // Remove o registro de histórico desta data para reabrir o dia
   db.history.splice(historyIdx, 1);
-  saveDb(db);
+  await saveDb(db);
 
   return res.json({ success: true });
 });
