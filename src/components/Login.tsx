@@ -30,7 +30,17 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         body: JSON.stringify({ username, password })
       });
 
-      const data = await response.json();
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonErr) {
+        throw new Error(
+          'Bloqueio de Cookies de Segurança (AI Studio): O navegador impediu os cookies de segurança necessários dentro do painel integrado (iframe).\n\n' +
+          '👉 Para RESOLVER EM 2 SEGUNDOS:\n' +
+          '1. Clique no botão "Open in new tab" (Abrir em nova aba) no canto superior direito do painel de visualização.\n' +
+          '2. Isso validará os cookies e liberará o acesso tanto na nova aba quanto aqui!'
+        );
+      }
 
       if (!response.ok) {
         throw new Error(data.error || 'Credenciais inválidas.');
@@ -71,7 +81,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         {error && (
           <div className="mb-6 p-4 bg-red-50 text-red-700 text-sm rounded-lg border border-red-100 flex items-start gap-2 animate-pulse" id="login-error">
             <span>⚠️</span>
-            <p className="font-medium">{error}</p>
+            <p className="font-medium whitespace-pre-line text-left">{error}</p>
           </div>
         )}
 

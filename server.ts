@@ -30,9 +30,9 @@ app.use(express.json());
 // Diretorios necessarios para o sistema (fallback local para uploads de arquivos)
 const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
 
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
+try {
+  if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+} catch(e) { console.log('Serverless env: UPLOADS_DIR bypassed'); }
 
 const SECRET_KEY = process.env.API_SECRET_KEY || 'focodiario_secret_key_2026_super_secure';
 
@@ -231,9 +231,9 @@ const defaultDb: DatabaseSchema = {
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'focodiario_db.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+try {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch(e) { console.log('Serverless env: DATA_DIR bypassed'); }
 
 function loadDbFromFile(): DatabaseSchema {
   try {
@@ -1362,24 +1362,19 @@ app.post('/api/kanban/reopen-day', authenticate, async (req: any, res: any) => {
 // VITE MIDDLEWARE & SERVIDOR DE PRODUÇÃO
 // ==========================================
 
-async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa'
-    });
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  createViteServer({
+    server: { middlewareMode: true },
+    appType: 'spa'
+  }).then(vite => {
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`FocoDiario Server running on http://localhost:${PORT}`);
+    app.listen(PORT, '0.0.0.0', () => console.log(`FocoDiario Server running no modo local`));
   });
+} else {
+  const distPath = path.join(process.cwd(), 'dist');
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
 }
 
-startServer();
+// OBRIGATÓRIO PARA O VERCEL RECONHECER A API SERVERLESS
+export default app;

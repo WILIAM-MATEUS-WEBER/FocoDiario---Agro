@@ -24,13 +24,31 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   try {
     const response = await fetch(input, modifiedInit);
     
-    // Intercepta quando o proxy do AI Studio retorna HTML de verificação de cookies em vez de JSON para as rotas da API
+    // Cria uma cópia da resposta para inspecionar com segurança se ela retorna HTML (bloqueio do iframe/cookies) ou JSON
+    let isHtml = false;
+    try {
+      const responseClone = response.clone();
+      const bodyText = (await responseClone.text()).trim();
+      if (
+        bodyText.startsWith('<') || 
+        bodyText.toLowerCase().startsWith('<!doctype') ||
+        bodyText.toLowerCase().includes('<html>') ||
+        bodyText.toLowerCase().includes('<body>') ||
+        bodyText.startsWith('A página')
+      ) {
+        isHtml = true;
+      }
+    } catch (_) {
+      // Falha ao ler o clone da resposta, trata como não-HTML
+    }
+
     const contentType = response.headers.get('content-type');
-    if (contentType && contentType.includes('text/html') && String(input).includes('/api/')) {
+    if (isHtml || (contentType && contentType.includes('text/html') && String(input).includes('/api/'))) {
       throw new Error(
-        'Bloqueio de Cookies (AI Studio): O navegador impediu os cookies de segurança necessários na janela integrada (iframe). ' +
-        'Para resolver isso em 2 segundos: clique no botão "Open in new tab" (Abrir em nova aba) localizado no canto superior direito do painel de visualização da plataforma. ' +
-        'Isso validará as credenciais de segurança do seu navegador e permitirá o uso normal!'
+        'Bloqueio de Cookies de Segurança (AI Studio): O navegador impediu os cookies de segurança necessários dentro do painel integrado (iframe).\n\n' +
+        '👉 Para RESOLVER EM 2 SEGUNDOS:\n' +
+        '1. Clique no botão "Open in new tab" (Abrir em nova aba) localizado no canto superior direito do seu painel de visualização (preview).\n' +
+        '2. Isso validará os cookies e permitirá o acesso imediato tanto na aba externa quanto aqui!'
       );
     }
 
