@@ -31,10 +31,14 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       });
 
       let data;
+      const responseText = await response.text();
       try {
-        data = await response.json();
+        data = JSON.parse(responseText);
       } catch (jsonErr) {
-        throw new Error('Falha ao processar resposta do servidor. Por favor, tente novamente.');
+        throw new Error(
+          `Erro na resposta do servidor (Status ${response.status}).\n` +
+          `Retorno obtido: ${responseText.substring(0, 150)}${responseText.length > 150 ? '...' : ''}`
+        );
       }
 
       if (!response.ok) {

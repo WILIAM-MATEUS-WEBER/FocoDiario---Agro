@@ -139,7 +139,8 @@ app.get('/uploads/:filename', (req, res) => {
 
 // Helper para hashing seguro de senhas utilizando Node.js crypto (PBKDF2 - alto nivel de seguranca contra injection e brute force)
 function hashPassword(password: string, salt: string): string {
-  return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+  const safeSalt = salt || 'default_salt_fallback_2026';
+  return crypto.pbkdf2Sync(password || '', safeSalt, 1000, 64, 'sha512').toString('hex');
 }
 
 function generateSalt(): string {
@@ -288,64 +289,94 @@ async function initPostgresDb() {
 
 async function loadDb(): Promise<DatabaseSchema> {
   const isPostgresEnabled = !!(process.env.POSTGRES_URL || process.env.DATABASE_URL);
+  let db: DatabaseSchema;
+
   if (!isPostgresEnabled) {
     if (cachedDb) return cachedDb;
-    cachedDb = loadDbFromFile();
-    return cachedDb;
-  }
-
-  try {
-    const { rows } = await sql`SELECT db_state FROM app_storage WHERE id = 'focodiario' LIMIT 1;`;
-    if (rows && rows.length > 0) {
-      const db = rows[0].db_state as DatabaseSchema;
-      
-      // Sanitizações de campos para garantir migrações antigas de forma segura
-      let changed = false;
-      if (!db.breeds) {
-        db.breeds = [
-          'Pinto de Corte (Frango / Pesado)',
-          'Pinto de Postura (Poedeira de Ovos)',
-          'Pinto Carijó Especial',
-          'Pinto Caipira Colonial',
-          'Pinto Pescoço Pelado Caipira',
-          'Pinto de Angola (Tô Fraco)'
-        ];
-        changed = true;
+    db = loadDbFromFile();
+  } else {
+    try {
+      const { rows } = await sql`SELECT db_state FROM app_storage WHERE id = 'focodiario' LIMIT 1;`;
+      if (rows && rows.length > 0) {
+        db = rows[0].db_state as DatabaseSchema;
+      } else {
+        const currentMonth = new Date().toISOString().substring(0, 7);
+        db = {
+          ...defaultDb,
+          mensalidades: (defaultDb.mensalidadesTemplates || []).map(t => ({
+            id: `m-${Date.now()}-${t.id}-${Math.floor(Math.random() * 1000)}`,
+            templateId: t.id,
+            name: t.name,
+            value: t.value,
+            dueDay: t.dueDay,
+            category: t.category,
+            status: 'pending',
+            month: currentMonth
+          }))
+        };
+        try {
+          await sql`INSERT INTO app_storage (id, db_state) VALUES ('focodiario', ${JSON.stringify(db)});`;
+        } catch (e) {
+          console.error('Falha ao inserir estado default no Vercel Postgres:', e);
+        }
       }
-      if (!db.mensalidadesTemplates) {
-        db.mensalidadesTemplates = [];
-        changed = true;
-      }
-      if (changed) {
-        await saveDb(db);
-      }
-      return db;
+    } catch (err) {
+      console.error('Erro de leitura no Vercel Postgres. Tentando fallback local...', err);
+      if (cachedDb) return cachedDb;
+      db = loadDbFromFile();
     }
-  } catch (err) {
-    console.error('Erro de leitura no Vercel Postgres. Tentando fallback local...', err);
   }
 
-  // Se não existir ou ocorrer falha na leitura inicial, insere o defaultDb e retorna ele
-  const currentMonth = new Date().toISOString().substring(0, 7);
-  const initialDb: DatabaseSchema = {
-    ...defaultDb,
-    mensalidades: (defaultDb.mensalidadesTemplates || []).map(t => ({
-      id: `m-${Date.now()}-${t.id}-${Math.floor(Math.random() * 1000)}`,
-      templateId: t.id,
-      name: t.name,
-      value: t.value,
-      dueDay: t.dueDay,
-      category: t.category,
-      status: 'pending',
-      month: currentMonth
-    }))
-  };
-  try {
-    await sql`INSERT INTO app_storage (id, db_state) VALUES ('focodiario', ${JSON.stringify(initialDb)});`;
-  } catch (e) {
-    console.error('Falha ao inserir estado default no Vercel Postgres:', e);
+  // Sanitização estrutural global e rigorosa (tolerante a migrações incompletas ou esquemas vazios)
+  let changed = false;
+  if (!db) {
+    db = { ...defaultDb };
+    changed = true;
   }
-  return initialDb;
+  if (!db.users || !Array.isArray(db.users) || db.users.length === 0) {
+    db.users = [...defaultDb.users];
+    changed = true;
+  }
+  if (!db.tasks || !Array.isArray(db.tasks)) {
+    db.tasks = [];
+    changed = true;
+  }
+  if (!db.history || !Array.isArray(db.history)) {
+    db.history = [];
+    changed = true;
+  }
+  if (!db.mensalidades || !Array.isArray(db.mensalidades)) {
+    db.mensalidades = [];
+    changed = true;
+  }
+  if (!db.batches || !Array.isArray(db.batches)) {
+    db.batches = [];
+    changed = true;
+  }
+  if (!db.breeds || !Array.isArray(db.breeds)) {
+    db.breeds = [...(defaultDb.breeds || [])];
+    changed = true;
+  }
+  if (!db.mensalidadesTemplates || !Array.isArray(db.mensalidadesTemplates)) {
+    db.mensalidadesTemplates = [...(defaultDb.mensalidadesTemplates || [])];
+    changed = true;
+  }
+
+  // Reparação de salts ausentes para usuários em banco de dados obsoletos/legados para evitar erros fatais em pbkdf2
+  for (const u of db.users) {
+    if (!u.salt) {
+      u.salt = generateSalt();
+      u.passwordHash = hashPassword(u.username === 'admin' ? 'admin123' : 'funcionario123', u.salt);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await saveDb(db);
+  }
+
+  cachedDb = db;
+  return db;
 }
 
 async function saveDb(db: DatabaseSchema): Promise<void> {
