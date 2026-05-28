@@ -34,12 +34,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       try {
         data = await response.json();
       } catch (jsonErr) {
-        throw new Error(
-          'Bloqueio de Cookies de Segurança (AI Studio): O navegador impediu os cookies de segurança necessários dentro do painel integrado (iframe).\n\n' +
-          '👉 Para RESOLVER EM 2 SEGUNDOS:\n' +
-          '1. Clique no botão "Open in new tab" (Abrir em nova aba) no canto superior direito do painel de visualização.\n' +
-          '2. Isso validará os cookies e liberará o acesso tanto na nova aba quanto aqui!'
-        );
+        throw new Error('Falha ao processar resposta do servidor. Por favor, tente novamente.');
       }
 
       if (!response.ok) {
